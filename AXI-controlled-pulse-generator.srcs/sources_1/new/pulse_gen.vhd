@@ -18,7 +18,6 @@
 -- 
 ----------------------------------------------------------------------------------
 
--- Heloo I make changes to check if git works
 
 library IEEE;
 use IEEE.STD_LOGIC_1164.ALL;
@@ -36,13 +35,13 @@ use IEEE.NUMERIC_STD.ALL;
 entity pulse_gen is
 --  Port ( );
     port(
-        clk             : in std_logic;             -- system clock (50 MHz, 20ns cycle)                     
-        rst_n           : in std_logic;             -- synchronous reset (active low)
-        start           : in std_logic;             -- start pulse sequence
-        pulse_width_i   : unsigned(3 downto 0);     -- number of cycles output is HIGH
-        pri_i           : unsigned(3 downto 0);     -- total cycles per pulse
-        burst_len_i     : unsigned(3 downto 0);     -- number of pulses
-        pulse_out       : out std_logic             -- digital pulse signal
+        clk                 : in std_logic;     -- System clock (50 MHz, 20ns cycle)                     
+        rst_n               : in std_logic;     -- Synchronous reset (active low)
+        start               : in std_logic;     -- Start flag from software to start pulse sequence
+        pulse_high_time_i   : integer;          -- Pulse width (HIGH time). Number of cycles output is HIGH. Ex: 500 × 20 ns = 10 µs
+        pulse_period_i      : integer;          -- Total pulse period, total cycles per pulse (total period). Ex 1000 × 20 ns = 20 µs
+        bursts_i            : integer;          -- Number of pulses. Ex: 4.
+        pulse_out           : out std_logic     -- Digital pulse signal
         );
 end pulse_gen;
 
@@ -54,18 +53,22 @@ architecture rtl of pulse_gen is
     
     signal State : t_state;
     
-    signal width_cnt  : unsigned(3 downto 0);
-    signal pri_cnt    : unsigned(3 downto 0);
-    signal burst_cnt  : unsigned(3 downto 0);
-    signal width_reg  : unsigned(3 downto 0);
-    signal pri_reg    : unsigned(3 downto 0);     -- Total pulse period = pri_reg
-    signal burst_reg  : unsigned(3 downto 0);
+    signal high_cnt             : integer; -- Tracks how many clock cycles have been HIGH in this pulse. Incremetns once per clock
+    signal pulse_high_time_reg  : integer; -- Input register
     
-    signal busy : std_logic;
-    signal busy_reg : std_logic;
-    signal done : std_logic;
-    signal done_reg :std_logic;
-    signal pulse_out_reg : std_logic;
+    signal period_cnt           : integer; -- Tracks how many LOW cycles have elapsed since the HIGH phase ended
+    signal pulse_period_reg     : integer; -- Input register
+    
+    signal burst_cnt            : integer; -- Tracks how many pulses have been completed so far
+    signal burst_reg            : integer; -- Input register
+
+    signal busy          : std_logic;      -- Busy flag
+    signal busy_reg      : std_logic;
+    
+    signal done          : std_logic;      -- Done flag
+    signal done_reg      : std_logic;
+    
+    signal pulse_out_reg : std_logic;      -- Output register
     
 begin
 
@@ -73,21 +76,25 @@ p_state_machine : process(clk)
 begin
     if rising_edge(clk) then
         if rst_n= '0' then
-            width_cnt <= (others => '0');
-            pri_cnt <= (others => '0');
-            burst_cnt <= (others => '0');
+            -- Updating registers
             pulse_out_reg <= '0';
             busy_reg <= '0';
             done_reg <= '0';
-            State <= Idle;
+            -- Reset counters
+            high_cnt <= 0;
+            period_cnt <= 0;
+            burst_cnt <= 0;
+            -- Go to IDLE state
+            State <= IDLE;
         else
             
             --------------------------------------------------------------
             --STATE MACHINE
             --------------------------------------------------------------
             case State is
+            
                 ------------------------- IDLE ------------------------------
-                -- waiting for start
+                -- Waiting for start from software
                 when IDLE =>
                     pulse_out_reg <= '0';
                     busy_reg <= '0';
@@ -99,22 +106,26 @@ begin
                         
                         
                 ------------------------- LOAD --------------------------------
-                -- latch parameters, clear counters
+                -- Latch software parameters, clear counters, rejecting invalid config
                 when LOAD =>
                     
+                    -- Updating registers
                     pulse_out_reg <= '0';
                     busy_reg <= '1';
                     done_reg <= '0';
                     
-                    width_reg <= pulse_width_i;
-                    pri_reg   <= pri_i;
-                    burst_reg <= burst_len_i;
+                    -- Latching software parameter (inputs)
+                    pulse_high_time_reg <= pulse_high_time_i;
+                    pulse_period_reg   <= pulse_period_i;
+                    burst_reg <= bursts_i;
                     
-                    width_cnt <= "0000";
-                    pri_cnt   <= "0000";
-                    burst_cnt <= "0000";
+                    -- Reset counters
+                    high_cnt <= 0;
+                    period_cnt   <= 0;
+                    burst_cnt <= 0;
                     
-                    if width_reg >= pri_reg then
+                    -- Rejecting invalid config
+                    if pulse_high_time_i >= pulse_period_i then
                         State <= FINISHED;
                     else
                         State <= PULSE_HIGH;
@@ -123,38 +134,42 @@ begin
                     
                     
                 ---------------------- PULSE HIGH ----------------------------   
-                -- output high, count width            
+                -- Output high, count pulse high width            
                 when PULSE_HIGH =>
                     pulse_out_reg <= '1';
                     busy_reg <= '1';
                     done_reg <= '0';
-                 
-                    if width_cnt = width_reg-1 then
-                        width_cnt <= "0000";
+                    
+                    if high_cnt = pulse_high_time_reg-1 then
+                        high_cnt <= 0;
                         State <= PULSE_LOW;
                     else
-                        width_cnt <= width_cnt + 1;
+                        high_cnt <= high_cnt + 1;
                     end if;
                 --------------------------------------------------------------
                 
                     
                 ---------------------- PULSE LOW -----------------------------  
-                -- output low, count remainder of PRI    
+                -- output low, count remainder of pulse width    
                 when PULSE_LOW =>
                     pulse_out_reg <= '0';
                     busy_reg <= '1';
                     done_reg <= '0';
-                                   
-                    if pri_cnt = (pri_reg - width_reg - 1) then
-                        pri_cnt <= "0000";
+                    
+                               
+                    if period_cnt = (pulse_period_reg - pulse_high_time_reg - 1) then
+                         -- HIGH cycles = pulse_high_time_reg, so LOW cycles = pulse_period_reg - pulse_high_time_reg. Counter starts at 0, so -1   
+                        period_cnt <= 0;
+                        -- Pulse completed --> burt_cnt++
                         burst_cnt <= burst_cnt + 1;
                         if burst_cnt = burst_reg - 1 then
+                            -- Needed number of pulses has been reached
                             State <= FINISHED;
                         else
                             State <= PULSE_HIGH;
                         end if;
                     else
-                        pri_cnt <= pri_cnt + 1;
+                        period_cnt <= period_cnt + 1;
                     end if;
                 --------------------------------------------------------------      
                 
@@ -166,6 +181,7 @@ begin
                     busy_reg <= '0';
                     done_reg <= '1';
                     
+                    -- Handshake to confirm that start flag is 0 and can go back to IDLE state
                     if start = '0' then
                         done_reg <= '0';
                         State <= IDLE;
